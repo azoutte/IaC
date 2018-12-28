@@ -1,0 +1,334 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Cloudformation template to createa VPC, a private and public subnet and an EC2 spot instance in both subnets.
+Mappings:
+  CidrMappings:
+    public-subnet-1:
+      CIDR: 10.0.1.0/24
+    private-subnet-1:
+      CIDR: 10.0.2.0/24
+    vpc:
+      CIDR: 10.0.0.0/16
+  AWSLinux2Ami:
+    us-east-1:
+      AMI: ami-009d6802948d06e52
+    us-east-2:
+      AMI: ami-02e680c4540db351e
+    us-west-2:
+      AMI: ami-01bbe152bf19d0289
+Outputs:
+  awsRegionName:
+    Description: The name of the AWS Region your template was launched in
+    Value:
+      Ref: AWS::Region
+Parameters:
+  instanceType:
+    AllowedValues:
+    - c3.large
+    - t2.micro
+    - c4.large
+    - m3.large
+    Default: t2.micro
+    Description: EC2 instance type
+    Type: String
+  keyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the EC2 instances
+    Type: AWS::EC2::KeyPair::KeyName
+  sourceCidr:
+    Default: 73.153.176.223/32
+    Description: Optional - CIDR/IP range for instance ssh access - defaults to 0.0.0.0/0
+    Type: String
+Resources:
+  attachGateway:
+    DependsOn:
+    - vpc
+    - internetGateway
+    Properties:
+      InternetGatewayId:
+        Ref: internetGateway
+      VpcId:
+        Ref: vpc
+    Type: AWS::EC2::VPCGatewayAttachment
+  internetGateway:
+    DependsOn:
+    - vpc
+    Type: AWS::EC2::InternetGateway
+  publicRoute:
+    DependsOn:
+    - publicRouteTable
+    - internetGateway
+    - attachGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: internetGateway
+      RouteTableId:
+        Ref: publicRouteTable
+    Type: AWS::EC2::Route
+  publicRouteTable:
+    DependsOn:
+    - vpc
+    - attachGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: Public Route Table
+      VpcId:
+        Ref: vpc
+    Type: AWS::EC2::RouteTable
+  privateRouteTable:
+    DependsOn:
+    - vpc
+    - attachGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: Public Route Table
+      VpcId:
+        Ref: vpc
+    Type: AWS::EC2::RouteTable
+  publicSubnet1:
+    DependsOn: attachGateway
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Fn::FindInMap:
+        - CidrMappings
+        - public-subnet-1
+        - CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: Public Subnet 1
+      VpcId:
+        Ref: vpc
+    Type: AWS::EC2::Subnet
+  publicSubnet1RouteTableAssociation:
+    DependsOn:
+    - publicRouteTable
+    - publicSubnet1
+    - attachGateway
+    Properties:
+      RouteTableId:
+        Ref: publicRouteTable
+      SubnetId:
+        Ref: publicSubnet1
+    Type: AWS::EC2::SubnetRouteTableAssociation
+  privateSubnet1:
+    DependsOn: attachGateway
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Fn::FindInMap:
+        - CidrMappings
+        - private-subnet-1
+        - CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: Private Subnet 1
+      VpcId:
+        Ref: vpc
+    Type: AWS::EC2::Subnet
+  privateSubnet1RouteTableAssociation:
+    DependsOn:
+    - privateRouteTable
+    - privateSubnet1
+    - attachGateway
+    Properties:
+      RouteTableId:
+        Ref: privateRouteTable
+      SubnetId:
+        Ref: privateSubnet1
+    Type: AWS::EC2::SubnetRouteTableAssociation
+  securityGroup:
+    DependsOn:
+    - vpc
+    Properties:
+      GroupDescription: Spot fleet instance Security Group
+      SecurityGroupIngress:
+      - CidrIp:
+          Ref: sourceCidr
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      VpcId:
+        Ref: vpc
+    Type: AWS::EC2::SecurityGroup
+  SGBaseIngress:
+    DependsOn:
+    - securityGroup
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref securityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !Ref securityGroup
+
+  spotFleetPublic:
+     DependsOn:
+     - spotFleetRole
+     - spotFleetInstanceProfile
+     - securityGroup
+     Properties:
+       SpotFleetRequestConfigData:
+         AllocationStrategy: diversified
+         IamFleetRole:
+           Fn::GetAtt:
+           - spotFleetRole
+           - Arn
+         LaunchSpecifications:
+         - IamInstanceProfile:
+             Arn:
+               Fn::GetAtt:
+               - spotFleetInstanceProfile
+               - Arn
+           ImageId:
+             Fn::FindInMap:
+             - AWSLinux2Ami
+             - Ref: AWS::Region
+             - AMI
+           InstanceType:
+             Ref: instanceType
+           KeyName:
+             Ref: keyName
+           Monitoring:
+             Enabled: true
+           SecurityGroups:
+           - GroupId:
+               Ref: securityGroup
+           SubnetId: !Ref publicSubnet1
+           UserData:
+             Fn::Base64:
+               Fn::Sub: '!/bin/bash -xe
+
+                 export PATH=/usr/local/bin:$PATH
+
+                 yum -y --security update
+
+                 yum -y install jq
+
+                 easy_install pip
+
+                 pip install awscli
+
+                 aws configure set default.region ${AWS::Region}
+
+                 '
+         TargetCapacity: 1
+         TerminateInstancesWithExpiration: true
+     Type: AWS::EC2::SpotFleet
+  spotFleetPrivate:
+     DependsOn:
+     - spotFleetRole
+     - spotFleetInstanceProfile
+     - securityGroup
+     Properties:
+       SpotFleetRequestConfigData:
+         AllocationStrategy: diversified
+         IamFleetRole:
+           Fn::GetAtt:
+           - spotFleetRole
+           - Arn
+         LaunchSpecifications:
+         - IamInstanceProfile:
+             Arn:
+               Fn::GetAtt:
+               - spotFleetInstanceProfile
+               - Arn
+           ImageId:
+             Fn::FindInMap:
+             - AWSLinux2Ami
+             - Ref: AWS::Region
+             - AMI
+           InstanceType:
+             Ref: instanceType
+           KeyName:
+             Ref: keyName
+           Monitoring:
+             Enabled: true
+           SecurityGroups:
+           - GroupId:
+               Ref: securityGroup
+           SubnetId: !Ref privateSubnet1
+           UserData:
+             Fn::Base64:
+               Fn::Sub: '!/bin/bash -xe
+
+                 export PATH=/usr/local/bin:$PATH
+
+                 yum -y --security update
+
+                 yum -y install jq
+
+                 easy_install pip
+
+                 pip install awscli
+
+                 aws configure set default.region ${AWS::Region}
+
+                 '
+         TargetCapacity: 1
+         TerminateInstancesWithExpiration: true
+     Type: AWS::EC2::SpotFleet
+  spotFleetInstanceProfile:
+     DependsOn:
+     - spotFleetInstanceRole
+     Properties:
+       Path: /
+       Roles:
+       - Ref: spotFleetInstanceRole
+     Type: AWS::IAM::InstanceProfile
+  spotFleetInstanceRole:
+     Properties:
+       AssumeRolePolicyDocument:
+         Statement:
+         - Action:
+           - sts:AssumeRole
+           Effect: Allow
+           Principal:
+             Service:
+             - ec2.amazonaws.com
+         Version: 2012-10-17
+       ManagedPolicyArns:
+       - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+       Path: /
+     Type: AWS::IAM::Role
+  spotFleetRole:
+     Properties:
+       AssumeRolePolicyDocument:
+         Statement:
+         - Action:
+           - sts:AssumeRole
+           Effect: Allow
+           Principal:
+             Service:
+             - spotfleet.amazonaws.com
+         Version: 2012-10-17
+       ManagedPolicyArns:
+       - arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetRole
+       Path: /
+     Type: AWS::IAM::Role
+  vpc:
+    Properties:
+      CidrBlock:
+        Fn::FindInMap:
+        - CidrMappings
+        - vpc
+        - CIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+      - Key: Name
+        Value: VPC for ECS on EC2 Spot fleet
+    Type: AWS::EC2::VPC
+...
