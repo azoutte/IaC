@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: 'Lambda function to start an instance based on a passed Name tag.  WIP for the API Gateway to invoke that, but I don't currently have that working from Cloudformation '
+Resources:
+  apiGateway:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Name: "control"
+      Description: "Lauches the ControlInstance Lambda"
+      
+  apiGatewayRootMethod:
+    Type: "AWS::ApiGateway::Method"
+    DependsOn:
+    - ControlInstance
+    Properties:
+      AuthorizationType: "NONE"
+      HttpMethod: "GET"
+      Integration:
+        IntegrationHttpMethod: "GET"
+        Type: "AWS"
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations"
+          - lambdaArn: !GetAtt "ControlInstance.Arn"
+      ResourceId: !GetAtt "apiGateway.RootResourceId"
+      RestApiId: !Ref "apiGateway"
+
+  apiGatewayDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    DependsOn:
+      - "apiGatewayRootMethod"
+    Properties:
+      RestApiId: !Ref "apiGateway"
+      StageName: "call"
+
+  InstanceControlLambdaRole: 
+      Type: AWS::IAM::Role
+      Properties: 
+        AssumeRolePolicyDocument: 
+          Version: '2012-10-17'
+          Statement: 
+          - Effect: Allow
+            Principal: 
+              Service: lambda.amazonaws.com
+            Action: 
+            - sts:AssumeRole
+        Path: '/'
+        Policies: 
+        - PolicyName: logs
+          PolicyDocument: 
+            Statement: 
+            - Effect: Allow
+              Action: 
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource: arn:aws:logs:*:*:*
+        - PolicyName: EC2
+          PolicyDocument: 
+            Statement: 
+            - Effect: Allow
+              Action: 
+              - ec2:DescribeInstances
+              - ec2:StartInstances
+              - ec2:StopInstances
+              Resource: "*"
+        - PolicyName: lambda
+          PolicyDocument: 
+            Statement: 
+            - Effect: Allow
+              Action: 
+              - lambda:InvokeFunction
+              - xray:PutTraceSegments
+              Resource: "*"
+  ControlInstance: 
+    Type: "AWS::Lambda::Function"
+    Properties: 
+      Handler: index.lambda_handler
+      Role: !Sub ${InstanceControlLambdaRole.Arn}
+      Runtime: "python3.6"
+      Timeout: 25
+      MemorySize: 128
+      TracingConfig:
+        Mode: "Active"
+      Code: 
+        ZipFile: !Sub |
+          import boto3
+          ec2 = boto3.resource('ec2')
+          def lambda_handler(event, context):
+            filters = [{
+                 'Name': 'tag:Name',
+                 'Values': [event['Name']]
+               }]
+            instances = ec2.instances.filter(Filters=filters)
+            RunningInstances = [instance.id for instance in instances]
+            if len(RunningInstances) > 0:
+               print("found these instances with tag", event['Name'], RunningInstances)
+            else:
+               print("none found")
+            client = boto3.client('ec2')
+          #    startinstances = client.start_instances(InstanceIds=RunningInstances)
+            return RunningInstances
